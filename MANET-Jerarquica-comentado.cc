@@ -43,7 +43,7 @@ NS_LOG_COMPONENT_DEFINE("HierarchicalMobilityMANET");
 //================================================================================
 // 3. FUNCTION PROTOTYPES
 //================================================================================
-void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor);
+void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor, uint32_t packetSizei);
 void UpdateHierarchicalMobility(Ptr<Node> superLeader, Ptr<Node> clusterLeaderA, Ptr<Node> clusterLeaderB, NodeContainer followersA, NodeContainer followersB, double followerSpeed, double noiseFactor);
 
 //================================================================================
@@ -56,7 +56,7 @@ int main(int argc, char *argv[]) {
     double areaSize = 200.0;       // 200x200 meters
     double followerSpeed = 1.5;    // m/s
     double noiseFactor = 1.0;      // randomness in follower movement
-
+    uint32_t packetSizei = 1024;   // Packetsize variety
     // --- Command Line Parser for customization ---
     CommandLine cmd;
     cmd.AddValue("nodesPerCluster", "Number of follower nodes per cluster", nodesPerCluster);
@@ -64,10 +64,11 @@ int main(int argc, char *argv[]) {
     cmd.AddValue("areaSize", "Side length of the simulation area in meters", areaSize);
     cmd.AddValue("followerSpeed", "Speed of follower nodes in m/s", followerSpeed);
     cmd.AddValue("noiseFactor", "Noise factor for follower movement", noiseFactor);
+    cmd.AddValue("packetSizei", "Packet size for the nodes", packetSizei);
     cmd.Parse(argc, argv);
 
     // --- Run Simulation ---
-    RunSimulation(nodesPerCluster, simulationTime, areaSize, followerSpeed, noiseFactor);
+    RunSimulation(nodesPerCluster, simulationTime, areaSize, followerSpeed, noiseFactor, packetSizei);
 
     return 0;
 }
@@ -79,7 +80,7 @@ int main(int argc, char *argv[]) {
 /**
  * @brief Configures and runs the hierarchical MANET simulation.
  */
-void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor) {
+void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor, uint32_t packetSizei ) {
     // --- Node Creation ---
     // Level 2
     NodeContainer superLeaderContainer;
@@ -236,7 +237,7 @@ void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaS
     for (uint32_t i = 0; i < followersA.GetN(); ++i) {
         OnOffHelper source("ns3::UdpSocketFactory", InetSocketAddress(leaderAIp, telemetryPort));
         source.SetConstantRate(DataRate("256kbps"));
-        source.SetAttribute("PacketSize", UintegerValue(1024));
+        source.SetAttribute("PacketSize", UintegerValue(packetSizei));
         ApplicationContainer app = source.Install(followersA.Get(i));
         app.Start(Seconds(2.0));
         app.Stop(Seconds(simulationTime - 2.0));
@@ -247,7 +248,7 @@ void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaS
     for (uint32_t i = 0; i < followersB.GetN(); ++i) {
         OnOffHelper source("ns3::UdpSocketFactory", InetSocketAddress(leaderBIp, telemetryPort));
         source.SetConstantRate(DataRate("256kbps"));
-        source.SetAttribute("PacketSize", UintegerValue(1024));
+        source.SetAttribute("PacketSize", UintegerValue(packetSizei));
         ApplicationContainer app = source.Install(followersB.Get(i));
         app.Start(Seconds(2.0));
         app.Stop(Seconds(simulationTime - 2.0));
@@ -291,6 +292,70 @@ void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaS
             NS_LOG_UNCOND("  Avg Latency: " << it->second.delaySum.GetMilliSeconds() / it->second.rxPackets << " ms");
         }
     }
+
+    // --- CSV File Setup ---
+    std::stringstream ss;
+    ss << "hierarchical_manet_stats_packetSize_" << packetSizei << ".csv";
+    std::string csvFileName = ss.str();
+    std::ofstream outFile;
+    std::ifstream testFile(csvFileName);
+
+    if (!testFile.good()) {
+        // File doesn't exist, create it and write the header
+        outFile.open(csvFileName, std::ios_base::out);
+        outFile << "NodesPerCluster,SimTime,AreaSize,FollowerSpeed,NoiseFactor,PacketSize,"
+                << "FlowID,SourceAddress,DestinationAddress,TxPackets,RxPackets,TxBytes,RxBytes,"
+                << "PacketDeliveryRatio,AvgLatency_ms,AvgThroughput_kbps" << std::endl;
+    } else {
+        // File exists, open in append mode
+        outFile.open(csvFileName, std::ios_base::app);
+    }
+
+    std::cout << "Writing statistics to " << csvFileName << "..." << std::endl;
+
+    for (auto it = stats.begin(); it != stats.end(); ++it) {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(it->first);
+        
+        // Filter to only include our application traffic on the specified telemetry port
+        if (t.destinationPort != telemetryPort) {
+            continue;
+        }
+
+        // --- Extract and Calculate Metrics ---
+        uint32_t txPackets = it->second.txPackets;
+        uint32_t rxPackets = it->second.rxPackets;
+        uint64_t txBytes = it->second.txBytes;
+        uint64_t rxBytes = it->second.rxBytes;
+        double delaySum_ms = it->second.delaySum.GetMilliSeconds();
+        
+        double pdr = (rxPackets > 0) ? ((double)rxPackets / txPackets) * 100.0 : 0.0;
+        double avgLatency = (rxPackets > 0) ? (delaySum_ms / rxPackets) : 0.0;
+        
+        // Calculate throughput in kbps for the duration of the flow
+        double flowDuration = (it->second.timeLastRxPacket.GetSeconds() - it->second.timeFirstTxPacket.GetSeconds());
+        double avgThroughput = (flowDuration > 0) ? (rxBytes * 8.0) / (flowDuration * 1000.0) : 0.0;
+        
+        // --- Write Data Row to CSV File ---
+        outFile << nodesPerCluster << ","
+                << simulationTime << ","
+                << areaSize << ","
+                << followerSpeed << ","
+                << noiseFactor << ","
+                << packetSizei << ","
+                << it->first << ","
+                << t.sourceAddress << ","
+                << t.destinationAddress << ","
+                << txPackets << ","
+                << rxPackets << ","
+                << txBytes << ","
+                << rxBytes << ","
+                << std::fixed << std::setprecision(2) << pdr << ","
+                << std::fixed << std::setprecision(2) << avgLatency << ","
+                << std::fixed << std::setprecision(2) << avgThroughput
+                << std::endl;
+    }
+    outFile.close();
+    std::cout << "Statistics saved." << std::endl;
 
     // --- Cleanup ---
     Simulator::Destroy();
