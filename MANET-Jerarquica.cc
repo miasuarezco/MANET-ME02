@@ -25,6 +25,7 @@
 #include "ns3/flow-monitor-module.h"
 #include "ns3/log.h"
 #include "ns3/olsr-helper.h"
+#include "ns3/olsr-routing-protocol.h"
 #include "ns3/netanim-module.h"
 #include "ns3/ipv4.h"
 
@@ -32,6 +33,7 @@
 #include <iomanip>
 
 using namespace ns3;
+using namespace ns3::olsr;
 
 //================================================================================
 // 2. GLOBAL VARIABLES & LOGGING
@@ -41,8 +43,9 @@ NS_LOG_COMPONENT_DEFINE("HierarchicalMobilityMANET");
 //================================================================================
 // 3. FUNCTION PROTOTYPES
 //================================================================================
-void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor);
+void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor, uint32_t packetSizei, uint32_t runNumber);
 void UpdateHierarchicalMobility(Ptr<Node> superLeader, Ptr<Node> clusterLeaderA, Ptr<Node> clusterLeaderB, NodeContainer followersA, NodeContainer followersB, double followerSpeed, double noiseFactor);
+ns3::Vector Normalize(const ns3::Vector& v); // Function prototype for Normalize
 
 //================================================================================
 // 4. MAIN FUNCTION
@@ -50,11 +53,12 @@ void UpdateHierarchicalMobility(Ptr<Node> superLeader, Ptr<Node> clusterLeaderA,
 int main(int argc, char *argv[]) {
     // --- Simulation Parameters ---
     uint32_t nodesPerCluster = 5;
-    double simulationTime = 150.0; // seconds
-    double areaSize = 500.0;       // 500x500 meters
-    double followerSpeed = 5.0;    // m/s
-    double noiseFactor = 1.5;      // randomness in follower movement
-
+    double simulationTime = 160.0; // seconds
+    double areaSize = 200.0;       // 200x200 meters
+    double followerSpeed = 1.5;    // m/s
+    double noiseFactor = 1.0;      // randomness in follower movement
+    uint32_t packetSizei = 1024;   // Packetsize variety
+    uint32_t numRuns = 1;          // New parameter for number of runs
     // --- Command Line Parser for customization ---
     CommandLine cmd;
     cmd.AddValue("nodesPerCluster", "Number of follower nodes per cluster", nodesPerCluster);
@@ -62,10 +66,17 @@ int main(int argc, char *argv[]) {
     cmd.AddValue("areaSize", "Side length of the simulation area in meters", areaSize);
     cmd.AddValue("followerSpeed", "Speed of follower nodes in m/s", followerSpeed);
     cmd.AddValue("noiseFactor", "Noise factor for follower movement", noiseFactor);
+    cmd.AddValue("packetSizei", "Packet size for the nodes", packetSizei);
+    cmd.AddValue("numRuns", "Number of simulation repetitions", numRuns); // Added numRuns
     cmd.Parse(argc, argv);
 
-    // --- Run Simulation ---
-    RunSimulation(nodesPerCluster, simulationTime, areaSize, followerSpeed, noiseFactor);
+    // --- Run Simulation Loop ---
+    for (uint32_t run = 0; run < numRuns; ++run) {
+        RngSeedManager::SetRun(run + 1); // Set a unique random seed for each run 
+        std::cout << "Running simulation " << (run + 1) << "/" << numRuns << " for packet size: " << packetSizei << std::endl;
+        // Pass all parameters, including the current run number
+        RunSimulation(nodesPerCluster, simulationTime, areaSize, followerSpeed, noiseFactor, packetSizei, run + 1);
+    }
 
     return 0;
 }
@@ -77,7 +88,7 @@ int main(int argc, char *argv[]) {
 /**
  * @brief Configures and runs the hierarchical MANET simulation.
  */
-void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor) {
+void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaSize, double followerSpeed, double noiseFactor, uint32_t packetSizei, uint32_t runNumber) {
     // --- Node Creation ---
     // Level 2
     NodeContainer superLeaderContainer;
@@ -100,35 +111,78 @@ void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaS
     clusterA_nodes.Add(clusterLeaderA);
     NodeContainer clusterB_nodes = followersB;
     clusterB_nodes.Add(clusterLeaderB);
-
-    // --- Mobility Setup ---
-    MobilityHelper mobility;
     
-    // Super-Leader moves randomly across the entire area (Defines system movement)
-    mobility.SetMobilityModel("ns3::RandomWaypointMobilityModel",
-                              "Speed", StringValue("ns3::UniformRandomVariable[Min=5|Max=15]"),
-                              "Pause", StringValue("ns3::ConstantRandomVariable[Constant=2.0]"),
-                              "PositionAllocator", CreateObject<RandomRectanglePositionAllocator>()
-                                ->SetAttribute("X", StringValue("ns3::UniformRandomVariable[Min=0|Max=" + std::to_string(areaSize) + "]"))
-                                ->SetAttribute("Y", StringValue("ns3::UniformRandomVariable[Min=0|Max=" + std::to_string(areaSize) + "]")));
-    mobility.Install(superLeader);
 
-    // All other nodes will have their positions updated programmatically.
-    // We install a simple mobility model as a placeholder.
+    Ptr<RandomRectanglePositionAllocator> alloc = CreateObject<RandomRectanglePositionAllocator>();
+
+    // Super-Leader mobilitySuperLeader model
+
+    Ptr<WaypointMobilityModel> mobilitySuperLeader = CreateObject<WaypointMobilityModel>();
+    superLeader->AggregateObject(mobilitySuperLeader);
+
+    // Posición inicial
+    mobilitySuperLeader->AddWaypoint(Waypoint(Seconds(0.0), Vector(50.0, 50.0, 0.0)));
+
+    // Reubicación en tiempo aleatorio
+    // Tiempo aleatorio entre la mitad y el final de la simulación
+
+    // Nueva posición aleatoria dentro de un rango (ej. 200x200m)
+    Ptr<UniformRandomVariable> uv = CreateObject<UniformRandomVariable>();
+    uv->SetAttribute("Min", DoubleValue(simulationTime / 2.0));
+    uv->SetAttribute("Max", DoubleValue(simulationTime));
+    double moveTime = uv->GetValue();
+
+    Ptr<UniformRandomVariable> posX = CreateObject<UniformRandomVariable>();
+    posX->SetAttribute("Min", DoubleValue(0.0));
+    posX->SetAttribute("Max", DoubleValue(200.0));
+    double x = posX->GetValue();
+
+    Ptr<UniformRandomVariable> posY = CreateObject<UniformRandomVariable>();
+    posY->SetAttribute("Min", DoubleValue(0.0));
+    posY->SetAttribute("Max", DoubleValue(200.0));
+    double y = posY->GetValue();
+    Vector newPosition(x, y, 0.0);
+
+    // Añadir waypoint
+    mobilitySuperLeader->AddWaypoint(Waypoint(Seconds(moveTime), newPosition));
+    
+
+    // lideres mobilidad
+    
+    Ptr<PositionAllocator> positionAlloc = CreateObject<RandomRectanglePositionAllocator>();
+    positionAlloc->SetAttribute("X", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=200.0]"));
+    positionAlloc->SetAttribute("Y", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=200.0]"));
+
+    MobilityHelper mobilityLeaders;
+    mobilityLeaders.SetMobilityModel("ns3::RandomWaypointMobilityModel",
+        "Speed", StringValue("ns3::UniformRandomVariable[Min=0.5|Max=1.5]"), // movimiento lento
+        "Pause", StringValue("ns3::ConstantRandomVariable[Constant=5.0]"),  // pausas realistas
+        "PositionAllocator", PointerValue(positionAlloc));
+    
+
+    mobilityLeaders.SetPositionAllocator(positionAlloc);
+    mobilityLeaders.Install(clusterLeadersContainer);
+    
+    MobilityHelper mobility;
+    // seguidores mobilidad
     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-    mobility.Install(clusterLeadersContainer);
     mobility.Install(followersA);
     mobility.Install(followersB);
-
+    
+    std::cout << "Hola desde el simulador" << std::endl;
+    
     // --- Channel, PHY, and MAC Setup ---
     YansWifiChannelHelper wifiChannel = YansWifiChannelHelper::Default();
+    wifiChannel.AddPropagationLoss("ns3::LogDistancePropagationLossModel");
+    wifiChannel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
+
     YansWifiPhyHelper wifiPhy;
     wifiPhy.SetChannel(wifiChannel.Create());
     WifiMacHelper wifiMac;
     wifiMac.SetType("ns3::AdhocWifiMac");
     WifiHelper wifi;
     wifi.SetStandard(WIFI_STANDARD_80211n);
-
+    
     // --- Network Stack and Protocol Setup ---
     InternetStackHelper internet;
     OlsrHelper olsr;
@@ -150,11 +204,13 @@ void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaS
     address.SetBase("10.1.1.0", "255.255.255.0");
     NetDeviceContainer clusterADevices = wifi.Install(wifiPhy, wifiMac, clusterA_nodes);
     Ipv4InterfaceContainer clusterAInterfaces = address.Assign(clusterADevices);
+    std::cout<< "Cluster A IP in BASE: 10.1.1.0" << std::endl;
 
     // Subnet 3: Cluster B network
     address.SetBase("10.1.2.0", "255.255.255.0");
     NetDeviceContainer clusterBDevices = wifi.Install(wifiPhy, wifiMac, clusterB_nodes);
     Ipv4InterfaceContainer clusterBInterfaces = address.Assign(clusterBDevices);
+    
     
     // --- Enable IP Forwarding and Configure HNA for Inter-Cluster Routing ---
     // Leaders need IP forwarding to route packets between their interfaces.
@@ -170,62 +226,149 @@ void RunSimulation(uint32_t nodesPerCluster, double simulationTime, double areaS
     Ptr<olsr::RoutingProtocol> olsrB = clusterLeaderB->GetObject<Ipv4>()->GetRoutingProtocol()->GetObject<olsr::RoutingProtocol>();
     olsrB->AddHostNetworkAssociation(Ipv4Address("10.1.2.0"), Ipv4Mask("255.255.255.0"));
 
-    // --- Application Setup (Traffic from Cluster A to Cluster B) ---
-    uint16_t port = 9;
-    // A follower in Cluster B will be the sink
-    Ptr<Node> sinkNode = followersB.Get(0); 
-    PacketSinkHelper sink("ns3::UdpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), port));
-    ApplicationContainer sinkApps = sink.Install(sinkNode);
+    // --- Application Setup (Telemetria desde seguidores a lideres)
+    
+    uint16_t telemetryPort = 9;
+
+    // --- Sink apps en líderes ---
+    PacketSinkHelper sink("ns3::UdpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), telemetryPort));
+
+    ApplicationContainer sinkApps;
+    sinkApps.Add(sink.Install(clusterLeaderA));
+    sinkApps.Add(sink.Install(clusterLeaderB));
     sinkApps.Start(Seconds(1.0));
     sinkApps.Stop(Seconds(simulationTime));
 
-    // A follower in Cluster A will be the source
-    OnOffHelper source("ns3::UdpSocketFactory", InetSocketAddress(sinkNode->GetObject<Ipv4>()->GetAddress(2, 0).GetLocal(), port));
-    source.SetConstantRate(DataRate("2kbps"));
-    source.SetAttribute("PacketSize", UintegerValue(1024));
-    ApplicationContainer sourceApps = source.Install(followersA.Get(0));
-    sourceApps.Start(Seconds(2.0));
-    sourceApps.Stop(Seconds(simulationTime - 2.0));
+    // --- Telemetría desde seguidores A hacia clusterLeaderA ---
+    Ipv4Address leaderAIp = clusterAInterfaces.GetAddress(0); 
+    std::cout<< "Leader A IP: " << leaderAIp << std::endl;
+    for (uint32_t i = 0; i < followersA.GetN(); ++i) {
+        OnOffHelper source("ns3::UdpSocketFactory", InetSocketAddress(leaderAIp, telemetryPort));
+        source.SetConstantRate(DataRate("256kbps"));
+        source.SetAttribute("PacketSize", UintegerValue(packetSizei));
+        ApplicationContainer app = source.Install(followersA.Get(i));
+        app.Start(Seconds(2.0));
+        app.Stop(Seconds(simulationTime - 2.0));
+    }
 
-    // --- Monitoring & Visualization ---
-    FlowMonitorHelper flowmon;
-    Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+    // --- Telemetría desde seguidores B hacia clusterLeaderB ---
+    Ipv4Address leaderBIp = clusterBInterfaces.GetAddress(0); // Última IP = líder
+    for (uint32_t i = 0; i < followersB.GetN(); ++i) {
+        OnOffHelper source("ns3::UdpSocketFactory", InetSocketAddress(leaderBIp, telemetryPort));
+        source.SetConstantRate(DataRate("256kbps"));
+        source.SetAttribute("PacketSize", UintegerValue(packetSizei));
+        ApplicationContainer app = source.Install(followersB.Get(i));
+        app.Start(Seconds(2.0));
+        app.Stop(Seconds(simulationTime - 2.0));
+    }
 
-    AnimationInterface anim("HierarchicalMobility.xml");
+
+
+    std::stringstream animFileName;
+    animFileName << "HierarchicalMobility_" << packetSizei << ".xml";
+    AnimationInterface anim(animFileName.str());
     anim.SetConstantPosition(superLeader, 10, 10); // Initial placeholder positions
     anim.SetConstantPosition(clusterLeaderA, 20, 20);
     anim.SetConstantPosition(clusterLeaderB, 30, 30);
-
+    
     // --- Schedule Mobility Updates ---
-    // This is the core function that drives the custom hierarchical mobility.
     double updateInterval = 0.1; // seconds
-    Simulator::Schedule(Seconds(0.1), &UpdateHierarchicalMobility, superLeader, clusterLeaderA, clusterLeaderB, followersA, followersB, followerSpeed, noiseFactor);
+    Simulator::Schedule(Seconds(updateInterval), &UpdateHierarchicalMobility, superLeader, clusterLeaderA, clusterLeaderB, followersA, followersB, followerSpeed, noiseFactor);
+    
+    std::cout << "Fin de configuracion de simulacion, empezando simulacion" << std::endl;
+    // --- Post-Simulation Analysis ---
+    FlowMonitorHelper flowmon;
+    Ptr<FlowMonitor> monitor = flowmon.InstallAll();
 
     // --- Run Simulation ---
     Simulator::Stop(Seconds(simulationTime));
     Simulator::Run();
 
-    // --- Post-Simulation Analysis ---
+    std::cout << "Fin simulacion, datos" << std::endl;
+    
     monitor->CheckForLostPackets();
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
     FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats();
 
-    for (auto it = stats.begin(); it != stats.end(); ++it) {
-        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(it->first);
-        NS_LOG_UNCOND("Flow " << it->first << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")");
-        NS_LOG_UNCOND("  Tx Packets: " << it->second.txPackets);
-        NS_LOG_UNCOND("  Rx Packets: " << it->second.rxPackets);
-        NS_LOG_UNCOND("  PDR: " << (double)it->second.rxPackets / it->second.txPackets * 100 << "%");
-        if (it->second.rxPackets > 0) {
-            NS_LOG_UNCOND("  Avg Latency: " << it->second.delaySum.GetMilliSeconds() / it->second.rxPackets << " ms");
-        }
+    // --- CSV File Setup ---
+    std::stringstream ss;
+    // Using packetSizei in the filename as it's the varying parameter for analysis
+    ss << "hierarchical_manet_stats_packetSize_" << packetSizei << ".csv"; 
+    std::string csvFileName = ss.str();
+    std::ofstream outFile;
+    
+    // Check if the file already exists to decide whether to write header
+    std::ifstream testFile(csvFileName);
+    bool fileExists = testFile.good();
+    testFile.close(); // Close the test file stream
+
+    if (!fileExists) {
+        // File doesn't exist, create it and write the header
+        outFile.open(csvFileName, std::ios_base::out);
+        // Added 'RunNumber' to the header
+        outFile << "RunNumber,NodesPerCluster,SimTime,AreaSize,FollowerSpeed,NoiseFactor,PacketSize,"
+                << "FlowID,SourceAddress,DestinationAddress,TxPackets,RxPackets,TxBytes,RxBytes,"
+                << "PacketDeliveryRatio,AvgLatency_ms,AvgThroughput_kbps" << std::endl;
+    } else {
+        // File exists, open in append mode
+        outFile.open(csvFileName, std::ios_base::app);
     }
 
+    std::cout << "Writing statistics to " << csvFileName << "..." << std::endl;
+
+    for (auto it = stats.begin(); it != stats.end(); ++it) {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(it->first);
+        
+        // Filter to only include our application traffic on the specified telemetry port
+        uint16_t telemetryPort = 9; // Redefine if not global
+        if (t.destinationPort != telemetryPort) {
+            continue;
+        }
+
+        // --- Extract and Calculate Metrics ---
+        uint32_t txPackets = it->second.txPackets;
+        uint32_t rxPackets = it->second.rxPackets;
+        uint64_t txBytes = it->second.txBytes;
+        uint64_t rxBytes = it->second.rxBytes;
+        double delaySum_ms = it->second.delaySum.GetMilliSeconds();
+        
+        double pdr = (txPackets > 0) ? ((double)rxPackets / txPackets) * 100.0 : 0.0;
+        double avgLatency = (rxPackets > 0) ? (delaySum_ms / rxPackets) : 0.0;
+        
+        double flowDuration = (it->second.timeLastRxPacket.GetSeconds() - it->second.timeFirstTxPacket.GetSeconds());
+        double avgThroughput = (flowDuration > 0) ? (rxBytes * 8.0) / (flowDuration * 1000.0) : 0.0;
+        
+        // --- Write Data Row to CSV File ---
+        outFile << runNumber << "," // Added runNumber
+                << nodesPerCluster << ","
+                << simulationTime << ","
+                << areaSize << ","
+                << followerSpeed << ","
+                << noiseFactor << ","
+                << packetSizei << ","
+                << it->first << ","
+                << t.sourceAddress << ","
+                << t.destinationAddress << ","
+                << txPackets << ","
+                << rxPackets << ","
+                << txBytes << ","
+                << rxBytes << ","
+                << std::fixed << std::setprecision(2) << pdr << ","
+                << std::fixed << std::setprecision(2) << avgLatency << ","
+                << std::fixed << std::setprecision(2) << avgThroughput
+                << std::endl;
+    }
+    outFile.close();
+    std::cout << "Statistics saved." << std::endl;
+
     // --- Cleanup ---
-    Simulator::Destroy();
+    Simulator::Destroy(); // Destroy the simulator instance for the next run
 }
 
-
+ns3::Vector Normalize(const ns3::Vector& v) {
+    double mag = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    return (mag != 0) ? ns3::Vector(v.x / mag, v.y / mag, v.z / mag) : ns3::Vector(0, 0, 0);
+}
 //================================================================================
 // 6. HIERARCHICAL MOBILITY LOGIC
 //================================================================================
@@ -269,7 +412,7 @@ void UpdateHierarchicalMobility(Ptr<Node> superLeader, Ptr<Node> clusterLeaderA,
         Ptr<MobilityModel> followerMobility = followersA.Get(i)->GetObject<MobilityModel>();
         Vector followerPos = followerMobility->GetPosition();
         Vector direction = leaderAPos - followerPos;
-        Vector velocity = direction.Normalize() * followerSpeed + Vector(noise->GetValue(-noiseFactor, noiseFactor), noise->GetValue(-noiseFactor, noiseFactor), 0);
+        Vector velocity = Normalize(direction) * followerSpeed + Vector(noise->GetValue(-noiseFactor, noiseFactor), noise->GetValue(-noiseFactor, noiseFactor), 0);
         followerMobility->SetPosition(followerPos + velocity * 0.1); // Simple Euler integration
     }
 
@@ -279,7 +422,7 @@ void UpdateHierarchicalMobility(Ptr<Node> superLeader, Ptr<Node> clusterLeaderA,
         Ptr<MobilityModel> followerMobility = followersB.Get(i)->GetObject<MobilityModel>();
         Vector followerPos = followerMobility->GetPosition();
         Vector direction = leaderBPos - followerPos;
-        Vector velocity = direction.Normalize() * followerSpeed + Vector(noise->GetValue(-noiseFactor, noiseFactor), noise->GetValue(-noiseFactor, noiseFactor), 0);
+        Vector velocity = Normalize(direction) * followerSpeed + Vector(noise->GetValue(-noiseFactor, noiseFactor), noise->GetValue(-noiseFactor, noiseFactor), 0);
         followerMobility->SetPosition(followerPos + velocity * 0.1); // Simple Euler integration
     }
     
